@@ -157,10 +157,15 @@ def format_dataset_for_sft(dataset: Dataset, tokenizer) -> Dataset:
     """
 
     def format_example(example):
+        # Incorporate the thinking trace inside <think> tags
+        assistant_content = example["answer"]
+        if example.get("thinking"):
+            assistant_content = f"<think>\n{example['thinking'].strip()}\n</think>\n{assistant_content}"
+
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": example["question"]},
-            {"role": "assistant", "content": example["answer"]},
+            {"role": "assistant", "content": assistant_content},
         ]
         text = tokenizer.apply_chat_template(
             messages,
