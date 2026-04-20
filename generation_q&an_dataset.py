@@ -150,6 +150,7 @@ class QAPair:
     section: str
     question_type: str
     question: str
+    thinking: str
     answer: str
     confidence: str  # high / medium / low
     species: Optional[str]
@@ -251,7 +252,7 @@ Respond with ONLY a JSON object, no other text:
 
 
 def classify_drug_tier(drug_name: str, drug_text: str) -> dict:
-    """Calls Claude to classify the drug into a tier."""
+    """Calls LLM to classify the drug into a tier."""
     print(f"  [Tier classifier] Classifying {drug_name}...")
     # response = client.messages.create(
     #     model=MODEL,
@@ -346,7 +347,7 @@ ALWAYS include ALL of: species | route | dose range | frequency | any relevant d
 If multiple species exist in text, create SEPARATE questions for each species rather than one combined question.
 
 ### For drug interaction answers:
-IfReferences mentions specific drug interactions, ask about EACH one separately (not nested).
+If References mentions specific drug interactions, ask about EACH one separately (not nested).
 Example from text: "Can interact with Aspirin, Azole antifungals, Iron, Phenobarbital, Quinidine"
 → Generate ~5 pairs, one asking about Aspirin, one about Azole antifungals, etc. (NOT one pair covering all)
 
@@ -363,12 +364,39 @@ Example: "Store in airtight containers" or "No veterinary-labeled products avail
 Begin the answer with: WARNING:
 
 ### For refusal questions:
-The answer MUST be exactly:
-"I don't have reliable information on this in the available drug reference. Please consult a licensed veterinarian or a current pharmacology resource."
+The answer must express that information is unavailable 
+and redirect appropriately. Vary the wording naturally 
+based on WHY the refusal is happening.
 
-### Closing line:
-End every non-refusal clinical answer with:
-"Disclaimer: Always verify dosing and applicability with a licensed veterinarian before administering."
+Examples of valid refusal answers:
+
+# Data gap — species not covered:
+"Specific dosing data for this species is not available 
+in this drug entry. Species-specific pharmacokinetics 
+can differ significantly — please consult a veterinarian 
+experienced with this species."
+
+# Data gap — dose not listed:
+"A specific dose for this indication is not provided 
+in the available reference for this species. Please 
+consult a licensed veterinarian for current dosing 
+guidance."
+
+# Off-label not covered:
+"This use is not documented in the available drug 
+reference for this species. Please consult a 
+veterinarian before attempting this application."
+
+Rules for refusal answers:
+- Never invent or extrapolate clinical information
+- Always explain WHY you cannot answer specifically
+- Always redirect to appropriate resource
+- Vary the wording — do not repeat identical phrases
+- Keep it 1-3 sentences maximum
+- Use "general" when the answer applies across multiple 
+    species with no species-specific nuance. Use null only 
+    for practical, storage, or compounding questions with 
+    no clinical species context at all.
 
 ---
 
@@ -384,12 +412,115 @@ End every non-refusal clinical answer with:
     "comparison" | "practical" | "client_education" | "refusal"
 
 - "confidence": must be ONE of: "high" | "medium" | "low"
-  → Use "low" if the drug text only partially supports the answer.
-  → Use "medium" for theoretical interactions or when data is incomplete.
+  → Use "high" when the drug text directly and completely supports the answer.
+  → Use "medium" when the mechanism is plausible but clinical evidence is limited 
+     or the source only partially covers the answer.
+  → Use "low" when the source is incomplete, contradictory, or the answer 
+     requires extrapolation beyond what the text provides.
 
 - "safety_flag": boolean — true if the answer involves toxicity, contraindications, overdose, narrow therapeutic index, or any WARNING.
 
 - "refusal": boolean — true only for refusal-type questions.
+
+---
+
+## CONFIDENCE DISTRIBUTION REQUIREMENT
+You MUST follow this approximate distribution per batch:
+- "high"   → 60% of pairs
+- "medium" → 30% of pairs  
+- "low"    → 10% of pairs
+
+Before assigning "high" ask:
+- Is this DIRECTLY stated in the drug text?
+- Is there NO species extrapolation required?
+- Are there NO missing data points?
+If any answer is NO → use "medium" or "low"
+
+---
+
+## REFUSAL TYPE DEFINITION
+
+Only ONE type of refusal in this prompt:
+
+IN-DOMAIN REFUSAL (data gap):
+The question IS about veterinary pharmacology 
+but the drug text does not contain enough 
+information to answer.
+
+Examples:
+- Dose not listed for this species in the text
+- Drug interaction mentioned but not explained
+- Off-label use not covered in this entry
+- Exotic species where drug entry has no data
+
+→ confidence: "low"
+→ refusal: true
+→ thinking: what source does NOT contain → 
+            why extrapolation unsafe → 
+            refusal is correct action
+
+---
+
+## THINKING FIELD RULES (CRITICAL)
+
+- "thinking": internal reasoning trace before answering.
+  Style depends on question type:
+
+  NORMAL ANSWER (refusal=false):
+  Show reasoning as flowing sentences — no headers or labels.
+  Pattern: mechanism → evidence → caveat → confidence line
+  End with one line: "Confidence: HIGH/MEDIUM/LOW — [derived reason]"
+  
+  Length by question type:
+  - factual, client_education, practical → 2-3 sentences + confidence line
+  - monitoring, species_specific         → 3-4 sentences + confidence line
+  - clinical_scenario, safety_critical   → 4-6 sentences + confidence line
+  - comparison → 4-5 sentences + confidence line
+  - refusal    → 2-4 sentences + confidence line (already in refusal section)
+
+  REFUSAL (refusal=true, in-domain but no data):
+  Pattern: what source does NOT contain → why extrapolation unsafe → 
+           explicit refusal statement
+  End with: "Confidence: LOW — source does not contain this. 
+             Refusal appropriate. Do not extrapolate."
+  Length: 2-4 sentences + confidence line
+
+  Examples:
+
+  HIGH (factual, horse, HYPP):
+  "Acetazolamide inhibits carbonic anhydrase promoting renal excretion 
+  of potassium and bicarbonate. HYPP in horses causes hyperkalemia-induced 
+  muscle depolarization — directly addressed by this mechanism. Equine-specific 
+  clinical use is well established in Quarter Horse lineages. Note this manages 
+  episodes only, not the underlying genetic defect — dietary potassium 
+  restriction is also required.
+  Confidence: HIGH — direct source coverage, established equine mechanism, 
+  no conflicting evidence. Caveat retained: management only, not curative."
+
+  MEDIUM (dosing frequency, horse):
+  "Acetazolamide PK parameters in horses are documented — oral bioavailability, 
+  clearance, and MRT values exist from published equine studies. However specific 
+  dosing intervals for HYPP management are not standardized in the source. The PK 
+  data supports frequent dosing but does not prescribe an interval.
+  Confidence: MEDIUM — PK foundation solid, clinical dosing protocol 
+  not directly stated. Answer the known part, do not specify interval."
+
+  LOW (oral dose not listed):
+  "The source lists acetazolamide for HYPP in horses but does not provide 
+  a specific oral dose, route, or frequency. No dose range can be derived 
+  from the available entry. Inferring from human or canine data would be 
+  inappropriate — equine pharmacokinetics differ significantly and dosing 
+  errors carry serious consequences.
+  Confidence: LOW — requested dosing data absent from source. 
+  Refusal appropriate. Do not estimate or extrapolate."
+
+
+  Rules:
+  - No headers, labels, or bullet points
+  - No mention of any handbook or source by name
+  - Confidence level derived at end — never declared upfront
+  - All question types end with a confidence line
+  - Never pad LOW or OOD with clinical factors not in source
 
 ---
 
@@ -401,6 +532,80 @@ For "{section}" section specifically:
 - Avoid asking the same question twice
 - Ensure each pair brings NEW clinical or practical information
 
+--- 
+
+## FEW-SHOT EXAMPLES
+Study these carefully before generating.
+Notice:
+- Thinking DERIVES confidence at the end — never declares it upfront
+- Thinking explicitly references what was found or not found in the provided drug text
+- Confidence line always last — derived from reasoning above it
+- Refusal thinking shows active restraint — names exactly what is missing
+
+
+[
+    {
+        "question": "In horses, what condition is acetazolamide used to prevent or treat?",
+        "thinking": "Acetazolamide inhibits carbonic anhydrase promoting renal excretion of potassium and bicarbonate. HYPP in horses causes hyperkalemia-induced muscle depolarization — directly addressed by this mechanism. Equine-specific clinical use for HYPP prevention and treatment is well established in Quarter Horse lineages carrying the Impressive bloodline mutation. Note this manages episodes only, not the underlying genetic defect — dietary potassium restriction is also required alongside drug therapy. Confidence: HIGH — indication well established, mechanism clear, equine-specific evidence present, no conflicting data found. Caveat retained: management only, not curative.",
+        "answer": "Acetazolamide is used as a preventive and/or treatment for hyperkalemic periodic paralysis (HYPP) in horses. HYPP is a genetic muscle disorder that causes episodes of muscle weakness or paralysis, and acetazolamide can help manage these episodes.",
+        "question_type": "factual",
+        "confidence": "high",
+        "species": "horse",
+        "safety_flag": false,
+        "refusal": false
+    },
+    {
+        "question": "What is the primary reason Benoxinate-Fluorescein Ophthalmic is used in horses?",
+        "thinking": "Benoxinate is a corneal anesthetic and fluorescein a diagnostic staining agent — their combined ophthalmic use is well characterized in equine practice. Equine diagnostic procedures requiring corneal anesthesia include tonometry, ultrasonography, and gonioscopy — all directly supported by this drug combination. Benoxinate efficacy is documented as comparable to proparacaine, a standard equine ophthalmic anesthetic — this comparison is a strong confidence signal confirming established clinical use. No species extrapolation required — equine-specific diagnostic use is directly established. Confidence: HIGH — dual mechanism established, equine diagnostic use directly confirmed, efficacy comparison to proparacaine present. No gaps or conflicting evidence found.",
+        "answer": "Benoxinate-Fluorescein Ophthalmic is primarily used in horses for ophthalmic diagnostic procedures, such as tonometry, ocular ultrasonography, and gonioscopy. It provides corneal anesthesia, enabling these examinations to be performed with reduced discomfort to the horse. Its anesthetic effect is comparable to that achieved by topical proparacaine.",
+        "question_type": "factual",
+        "confidence": "high",
+        "species": "horse",
+        "safety_flag": false,
+        "refusal": false
+    },
+    {
+        "question": "If a veterinarian is considering acetazolamide for a dog with syringomyelia and increased CSF pressures, what is the documented evidence of its effectiveness?",
+        "thinking": "Acetazolamide inhibits carbonic anhydrase reducing CSF production — the mechanism theoretically supports use in elevated CSF pressure conditions. However syringomyelia involves complex spinal fluid dynamics including obstruction and syrinx formation beyond simple CSF volume reduction, and the pathophysiology may not respond to pressure reduction alone. Clinical studies in dogs showed acetazolamide was ineffective in reducing clinical signs or ventricle to brain ratio in canine syringomyelia — the mechanistic rationale exists but clinical evidence does not support this specific indication. Confidence: MEDIUM — mechanism plausible, but clinical evidence for this indication in dogs is negative. Answer should present both the theoretical basis and the contradicting clinical findings.",
+        "answer": "While acetazolamide has been used as an adjunctive treatment for increased CSF pressures associated with syringomyelia in dogs, studies have shown it was ineffective in reducing clinical signs or the ventricle:brain ratio. Therefore, its use in this scenario may not be beneficial.",
+        "question_type": "factual",
+        "confidence": "medium",
+        "species": "dog",
+        "safety_flag": false,
+        "refusal": false
+    },
+    {
+        "question": "What is a potential, rare, adverse reaction that may manifest when a patient sensitive to other local anesthetics receives benoxinate ophthalmic?",
+        "thinking": "Benoxinate shares structural similarities with other local anesthetics making cross-sensitivity pharmacologically plausible. This reaction is recognized as rare and described as pseudoallergic mimicking an IgE-mediated event — mechanism is theoretically consistent with mast cell degranulation, though the specific pathway in veterinary patients is not well documented. The reaction is flagged as a recognized risk without robust frequency or outcome data specific to veterinary species. Safety flag is warranted independently of confidence level — anaphylactoid potential carries clinical significance regardless of how rarely it occurs. Confidence: MEDIUM — reaction recognized as rare, mechanistic basis theoretically consistent but veterinary-specific frequency and clinical evidence limited. Safety flag appropriate given anaphylactoid potential.",
+        "answer": "WARNING: Although rare, benoxinate ophthalmic may cause a pseudoallergic (anaphylactoid) reaction mimicking an IgE-mediated vasodilatory event in patients sensitive to other local anesthetics. This reaction should be recognized and treated promptly.",
+        "question_type": "monitoring",
+        "confidence": "medium",
+        "species": null,
+        "safety_flag": true,
+        "refusal": false
+    },
+    {
+        "question": "What impact might acetazolamide have on a patient with a history of pulmonary obstruction?",
+        "thinking": "Acetazolamide inhibits carbonic anhydrase causing metabolic acidosis through bicarbonate excretion. In patients with pulmonary obstruction, respiratory compensation for acidosis is already compromised — adding metabolic acidosis could worsen hypoxia and increase respiratory distress. This combination is established as a contraindication, however specific mechanistic detail and clinical outcome data for this scenario are incomplete — the risk is flagged without full pharmacological explanation available. The safety concern is grounded in physiological reasoning but the absence of complete mechanistic detail prevents a fully confident answer. Confidence: LOW — contraindication established but mechanistic detail and clinical evidence incomplete. Answer must flag contraindication clearly without overstating detail that is not available.",
+        "answer": "WARNING: Acetazolamide is contraindicated in patients with significant pulmonary obstruction or respiratory compromise. The exact mechanism of harm in this context is not fully detailed in available references, but the risk of exacerbating respiratory compromise is sufficient to contraindicate its use. Please consult a licensed veterinarian before administering.",
+        "question_type": "factual",
+        "confidence": "low",
+        "species": "general",
+        "safety_flag": true,
+        "refusal": false
+    },
+    {
+        "question": "Can Benoxinate-Fluorescein Ophthalmic be administered to a small breed dog weighing 2 pounds for a minor ocular procedure?",
+        "thinking": "Benoxinate-Fluorescein ophthalmic use in dogs is established for diagnostic procedures. However weight-specific dosing guidelines or safety thresholds for very small or underweight canine patients are not available — pharmacokinetics in a 2 pound dog may differ significantly from standard canine dosing assumptions. Systemic absorption from ophthalmic application could carry disproportionate risk at this body weight, and no data exists to answer this safely for this patient size. Confidence: LOW — canine ophthalmic use established but weight-specific safety data absent. Refusal appropriate. Do not extrapolate standard dosing to this patient size.",
+        "answer": "I don't have reliable information on this specific weight-based dosing scenario for this drug. Please consult a licensed veterinarian experienced with very small breed patients for individualized dosing and safety guidance.",
+        "question_type": "clinical_scenario",
+        "confidence": "low",
+        "species": "dog",
+        "safety_flag": false,
+        "refusal": true
+    }
+]
+
 ---
 
 ## Output Format
@@ -410,6 +615,7 @@ Ensure all strings use ASCII characters only (no Unicode escapes, no special sym
 [
   {{
     "question": "<the question>",
+    "thinking": "<internal reasoning trace before answering>",
     "answer": "<full explanatory answer>",
     "question_type": "<one of the allowed types>",
     "confidence": "<high|medium|low>",
@@ -459,7 +665,7 @@ def generate_qa_pairs(
                     tier=tier_config.tier,
                     tier_name=tier_config.name,
                     tier_description=tier_config.description,
-                    drug_text=drug_text[:4000],
+                    drug_text=drug_text,
                     section=section.replace("_", " ").title(),
                     count=count,
                 ),
@@ -591,6 +797,7 @@ def process_drug(drug_name: str, drug_text: str) -> dict:
                         species=p.get("species"),
                         safety_flag=p.get("safety_flag", False),
                         refusal=p.get("refusal", False),
+                        thinking=p.get("thinking", ""),
                     )
                 )
             time.sleep(0.5)  # Rate limit courtesy
@@ -622,24 +829,24 @@ def process_drug(drug_name: str, drug_text: str) -> dict:
             qa.paraphrases = []
 
     # ── Step 4: Expand to training records ───────────────
-    training_records = []
-    for qa in all_qa_pairs:
-        training_records.extend(qa.to_training_records())
+    # training_records = []
+    # for qa in all_qa_pairs:
+    #     training_records.extend(qa.to_training_records())
 
-    result = {
-        "drug": drug_name,
-        "tier": tier_num,
-        "tier_name": tier_config.name,
-        "classification": classification,
-        "qa_pair_count": len(all_qa_pairs),
-        "training_record_count": len(training_records),
-        "qa_pairs": [asdict(qa) for qa in all_qa_pairs],
-        "training_records": training_records,
-    }
+    # result = {
+    #     "drug": drug_name,
+    #     "tier": tier_num,
+    #     "tier_name": tier_config.name,
+    #     "classification": classification,
+    #     "qa_pair_count": len(all_qa_pairs),
+    #     "training_record_count": len(training_records),
+    #     "qa_pairs": [asdict(qa) for qa in all_qa_pairs],
+    #     "training_records": training_records,
+    # }
 
     print(
         f"  ✓ {len(all_qa_pairs)} QA pairs → "
-        f"{len(training_records)} training records (with paraphrases)"
+        # f"{len(training_records)} training records (with paraphrases)"
     )
     return result
 
