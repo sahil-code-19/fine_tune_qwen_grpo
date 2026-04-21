@@ -833,16 +833,16 @@ def process_drug(drug_name: str, drug_text: str) -> dict:
     # for qa in all_qa_pairs:
     #     training_records.extend(qa.to_training_records())
 
-    # result = {
-    #     "drug": drug_name,
-    #     "tier": tier_num,
-    #     "tier_name": tier_config.name,
-    #     "classification": classification,
-    #     "qa_pair_count": len(all_qa_pairs),
-    #     "training_record_count": len(training_records),
-    #     "qa_pairs": [asdict(qa) for qa in all_qa_pairs],
-    #     "training_records": training_records,
-    # }
+    result = {
+        "drug": drug_name,
+        "tier": tier_num,
+        "tier_name": tier_config.name,
+        "classification": classification,
+        "qa_pair_count": len(all_qa_pairs),
+        # "training_record_count": len(training_records),
+        "qa_pairs": [asdict(qa) for qa in all_qa_pairs],
+        # "training_records": training_records,
+    }
 
     print(
         f"  ✓ {len(all_qa_pairs)} QA pairs → "
@@ -897,7 +897,7 @@ def run_batch(
                 json.dump(result, f, indent=2)
 
             # Accumulate
-            all_training_records.extend(result["training_records"])
+            # all_training_records.extend(result["training_records"])
             stats["by_tier"][result["tier"]] += 1
             stats["total_qa_pairs"] += result["qa_pair_count"]
             stats["total_training_records"] += result["training_record_count"]
@@ -1053,19 +1053,19 @@ if __name__ == "__main__":
         with open(full_path, "w") as f:
             json.dump(result, f, indent=2)
 
-        with open(jsonl_path, "w") as f:
-            for record in result["training_records"]:
-                f.write(json.dumps(record) + "\n")
+        # with open(jsonl_path, "w") as f:
+        #     for record in result["training_records"]:
+        #         f.write(json.dumps(record) + "\n")
 
         print(f"\n✅ Done!")
         print(f"   Drug          : {result['drug']}")
         print(f"   Tier          : {result['tier']} ({result['tier_name']})")
         print(f"   QA pairs      : {result['qa_pair_count']}")
-        print(
-            f"   Training recs : {result['training_record_count']} (with paraphrases)"
-        )
+        # print(
+        #     f"   Training recs : {result['training_record_count']} (with paraphrases)"
+        # )
         print(f"   Full JSON     : {full_path}")
-        print(f"   Training JSONL: {jsonl_path}")
+        # print(f"   Training JSONL: {jsonl_path}")
 
     # ── Batch mode: python main.py ─────────────────────────
     else:
